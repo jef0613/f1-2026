@@ -292,14 +292,14 @@ body {
 
       <div class="stat-box leader-box">
         <div class="lbl" data-i18n="leader">Championship Leader</div>
-        <div class="leader-name">K. Antonelli</div>
-        <div class="leader-sub">Mercedes &nbsp;&middot;&nbsp; <span class="leader-pts">72 pts</span></div>
+        <div class="leader-name" id="leader-name">K. Antonelli</div>
+        <div class="leader-sub" id="leader-sub">Mercedes &nbsp;&middot;&nbsp; <span class="leader-pts">72 pts</span></div>
       </div>
 
       <div class="stat-box prog-box">
         <div class="prog-lbl" data-i18n="seasonProg">Season Progress</div>
-        <div class="prog-frac">3 <span>/ 22</span></div>
-        <div class="prog-bar-bg"><div class="prog-bar-fill"></div></div>
+        <div class="prog-frac" id="prog-frac">3 <span>/ 22</span></div>
+        <div class="prog-bar-bg"><div class="prog-bar-fill" id="prog-bar-fill"></div></div>
       </div>
 
     </div>
@@ -332,6 +332,26 @@ body {
 </div>
 
 <script>
+// ── DRIVER ID → DISPLAY NAME MAP ─────────────────────────────────────────────
+const DRIVER_MAP = {
+  "antonelli":"K. Antonelli", "russell":"G. Russell",
+  "leclerc":"C. Leclerc",     "hamilton":"L. Hamilton",
+  "piastri":"O. Piastri",     "norris":"L. Norris",
+  "verstappen":"M. Verstappen","perez":"S. Perez",
+  "alonso":"F. Alonso",       "stroll":"L. Stroll",
+  "sainz":"C. Sainz",         "albon":"A. Albon",
+};
+
+// Chart uses distinct shades per driver within the same team
+const CHART_COLORS = {
+  "K. Antonelli":"#00D2BE", "G. Russell":"#5EEDE3",
+  "C. Leclerc":"#DC0000",   "L. Hamilton":"#FF7070",
+  "O. Piastri":"#FF8000",   "L. Norris":"#FFB347",
+  "M. Verstappen":"#3671C6","S. Perez":"#6B9FE4",
+  "F. Alonso":"#358C75",    "L. Stroll":"#63B99A",
+  "C. Sainz":"#64C4FF",     "A. Albon":"#A8D8FF",
+};
+
 // ── TEAMS ────────────────────────────────────────────────────────────────────
 const TEAMS = {
   "G. Russell":    { name: "Mercedes",     c: "#00D2BE" },
@@ -592,12 +612,12 @@ const CHART_DRIVERS = [
   { name: "C. Leclerc",   team: "Ferrari",  color: "#DC0000", pts: [0, 15, 22, 34, 49] },
   { name: "L. Hamilton",  team: "Ferrari",  color: "#FF7070", pts: [0, 12, 18, 33, 41] },
 ];
-const X_LABELS = ["Start", "Australia", "China Sprint", "China", "Japan"];
+let X_LABELS = ["Start", "Australia", "China Sprint", "China", "Japan"];
 // viewBox: 800 x 270
 const ML = 48, MR = 130, MT = 22, MB = 42;
 const CW = 800 - ML - MR; // 622
 const CH = 270 - MT - MB; // 206
-const MAX_Y = 80;
+let MAX_Y = 80;
 
 const px = i => ML + (i / (X_LABELS.length - 1)) * CW;
 const py = v => MT + CH - (v / MAX_Y) * CH;
@@ -685,6 +705,109 @@ function buildChart() {
 }
 
 applyLang();
+
+// ── LIVE DATA ─────────────────────────────────────────────────────────────────
+async function loadLiveData() {
+  const BASE = 'https://api.jolpi.ca/ergast/f1/2026';
+  try {
+    const [sRes, rRes, spRes] = await Promise.all([
+      fetch(`${BASE}/driverStandings.json`),
+      fetch(`${BASE}/results.json?limit=100`),
+      fetch(`${BASE}/sprint.json?limit=100`),
+    ]);
+    const [sJson, rJson, spJson] = await Promise.all([
+      sRes.json(), rRes.json(), spRes.json()
+    ]);
+
+    const driverStandings = sJson.MRData.StandingsTable.StandingsLists[0]?.DriverStandings || [];
+    const raceList        = rJson.MRData.RaceTable.Races || [];
+    const sprintList      = spJson.MRData.RaceTable.Races || [];
+
+    if (!raceList.length && !driverStandings.length) return; // no data yet
+
+    // Sprint results keyed by round
+    const sprintByRound = {};
+    sprintList.forEach(r => { sprintByRound[parseInt(r.round)] = r.SprintResults || []; });
+
+    // Update race podiums
+    raceList.forEach(race => {
+      const round = parseInt(race.round);
+      const entry = RACES.find(r => r.r === round);
+      if (entry && race.Results?.length >= 3) {
+        entry.result = race.Results.slice(0, 3).map(r =>
+          DRIVER_MAP[r.Driver.driverId] || `${r.Driver.givenName[0]}. ${r.Driver.familyName}`
+        );
+      }
+    });
+
+    // Update season progress
+    const completedCount = raceList.length;
+    document.getElementById('prog-frac').innerHTML = `${completedCount} <span>/ ${RACES.length}</span>`;
+    document.getElementById('prog-bar-fill').style.width = `${(completedCount / RACES.length * 100).toFixed(1)}%`;
+
+    // Update championship leader
+    if (driverStandings.length) {
+      const ld   = driverStandings[0];
+      const name = DRIVER_MAP[ld.Driver.driverId] || `${ld.Driver.givenName[0]}. ${ld.Driver.familyName}`;
+      document.getElementById('leader-name').textContent = name;
+      document.getElementById('leader-sub').innerHTML =
+        `${ld.Constructors[0]?.name || ''} &nbsp;&middot;&nbsp; <span class="leader-pts">${ld.points} pts</span>`;
+    }
+
+    // Rebuild chart data from round-by-round results
+    if (raceList.length >= 1 && driverStandings.length >= 4) {
+      const top4ids  = driverStandings.slice(0, 4).map(s => s.Driver.driverId);
+      const cumPts   = Object.fromEntries(top4ids.map(id => [id, 0]));
+      const newLabels = ['Start'];
+      const newSeries = driverStandings.slice(0, 4).map(s => {
+        const dispName = DRIVER_MAP[s.Driver.driverId] || `${s.Driver.givenName[0]}. ${s.Driver.familyName}`;
+        return {
+          driverId: s.Driver.driverId,
+          name:     dispName,
+          team:     s.Constructors[0]?.name || '',
+          color:    CHART_COLORS[dispName] || TEAMS[dispName]?.c || '#888',
+          pts:      [0],
+        };
+      });
+
+      raceList.map(r => parseInt(r.round)).sort((a, b) => a - b).forEach(round => {
+        const race    = raceList.find(r => parseInt(r.round) === round);
+        const raceLbl = (race.raceName || `R${round}`).replace(' Grand Prix', '').trim();
+
+        if (sprintByRound[round]?.length) {
+          sprintByRound[round].forEach(r => {
+            if (top4ids.includes(r.Driver.driverId))
+              cumPts[r.Driver.driverId] += parseFloat(r.points) || 0;
+          });
+          newLabels.push(`${raceLbl} Sprint`);
+          newSeries.forEach(d => d.pts.push(Math.round(cumPts[d.driverId])));
+        }
+
+        (race.Results || []).forEach(r => {
+          if (top4ids.includes(r.Driver.driverId))
+            cumPts[r.Driver.driverId] += parseFloat(r.points) || 0;
+        });
+        newLabels.push(raceLbl);
+        newSeries.forEach(d => d.pts.push(Math.round(cumPts[d.driverId])));
+      });
+
+      X_LABELS = newLabels;
+      CHART_DRIVERS.length = 0;
+      newSeries.forEach(s => CHART_DRIVERS.push(s));
+      MAX_Y = Math.ceil(Math.max(...CHART_DRIVERS.flatMap(d => d.pts)) / 20) * 20 || 80;
+    }
+
+    // Update "data correct as of" footer strings
+    const now = new Date();
+    STRINGS.en.dataCorrect = `Data correct as of ${now.toLocaleDateString('en-GB', { day:'numeric', month:'long', year:'numeric' })}`;
+    STRINGS.nl.dataCorrect = `Gegevens correct per ${now.toLocaleDateString('nl-NL', { day:'numeric', month:'long', year:'numeric' })}`;
+
+    applyLang();
+  } catch (err) {
+    console.warn('Live F1 data unavailable, using cached data:', err);
+  }
+}
+loadLiveData();
 </script>
 </body>
 </html>
